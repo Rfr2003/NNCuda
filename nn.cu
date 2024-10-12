@@ -4,8 +4,6 @@
 #include <math.h>
 #include <time.h>
 
-#define N 50 //taille layer sortie
-#define P 70 //taille layer entrée
 #define OUTPUT 2 //taille output
 #define BATCH_SIZE 2
 #define LEARNING_RATE 0.1f
@@ -147,8 +145,17 @@ void handle_malloc(void** dp, int size) {
     }
 }
 
+void handle_copy_of_network(network* net_to_copy, network* other, int direction) {
+    
+}
+
 //initialise les connexions entre deux layers
 layer* create_layer(int p, int n) {
+
+    if(p > 1024 || n > 1024) {
+        printf("Layers with dimensionality above 1024 are prohibited\n");
+        exit(EXIT_FAILURE);
+    }
     layer* l = (layer*)malloc(sizeof(layer));
 
     l->n = n;
@@ -240,6 +247,7 @@ void add_layer_to_network(network* n, layer* l) {
 }
 
 void cross_entropy(network* net) {
+    net->error[0] = 0;
     for(int i=0; i<net->layers[net->nb_layers-1]->n*BATCH_SIZE; i++) {
         net->error[0] += net->y[i] * logf(net->layers[net->nb_layers-1]->a[i]);
     }
@@ -247,79 +255,114 @@ void cross_entropy(network* net) {
 }
 
 __device__ void k_transpose_w(float* w, float* wT, int n, int p) {
-    int thread_number = blockDim.x * blockIdx.x + threadIdx.x;
+    int lid = threadIdx.x;
+    int begin_batch = blockIdx.x * n * p;
 
-    if(thread_number < n) {
-        int row = thread_number%n;
+    if(lid < n) {
         for(int j=0; j<p; j++) {
-            wT[j * n + row] = w[row * p + j];
+            wT[j*n + begin_batch + lid] = w[begin_batch + lid*p + j];
         }
     }
 }
 
 //calcule le gradient pour la dernière couche 
 __device__ void k_gradient_last_layer(float* da, float* a, float* y, int n) {
-    int thread_number = blockDim.x * blockIdx.x + threadIdx.x;
+    int lid = threadIdx.x;
+    int ind = blockIdx.x*n + lid;
 
-    if(thread_number < n*BATCH_SIZE) {
-        da[thread_number] = a[thread_number] - y[thread_number];
+    if(lid < n) {
+        da[ind] = a[ind] - y[ind];
     }
 }
 
 //calcule : grad_l {p_l+1/n_l, 1} = (w_l+1)^T{p_l+1, n_l+1} * grad_l+1 {n_l+1, 1} * deriv(ReLu(z_l) {n_l, 1})
 // p = p_l+1 et n = n_l+1
 __device__ void k_gradient_hidden_layer(float* da, float* da_next, float* w, float* z, int p, int n) {
-    int thread_number = blockDim.x * blockIdx.x + threadIdx.x;
+    int lid = threadIdx.x;
 
-    if (thread_number < p*BATCH_SIZE){
-        int row = thread_number%p;
-        float res = 0;
-        int begin = thread_number/p * n;
-        for(int i=0;i<n;i++){
-            res += w[row * n + i] * da_next[i + begin];
+    __shared__ float sh_da_next[1024];
+
+    int begin_batch = blockIdx.x*p;
+    float res = 0;
+
+    if(lid < n) {
+        sh_da_next[lid] = da_next[lid + blockIdx.x*n];
+    }
+    __syncthreads();
+
+
+    if (lid < p){
+
+        for(int row=0; row<n; row++) {
+            res += w[lid*n + row] * sh_da_next[row];
         }
-        da[thread_number] = res * (z[thread_number] > 0);
-        
+
+        da[lid + begin_batch] = res * (z[lid + begin_batch] > 0);
+
     }
 }
 
+//dw {n_l, p_l} = (grad_l) {n_l, 1} * (a_l-1) {1, p_l}
 __device__ void k_gradient_w(float* dw, float* da, float* a_previous, int n, int p){
-    int thread_number = blockDim.x * blockIdx.x + threadIdx.x;
+    int lid = threadIdx.x;
 
-    if (thread_number < n*BATCH_SIZE){
-        int row = thread_number%n;
-        int begin = thread_number - thread_number%(n*p);
-        for(int i=0;i<p;i++){
-            dw[row * p + i + begin] = da[thread_number/BATCH_SIZE * n + i] * a_previous[thread_number/BATCH_SIZE * p + i];
-        }       
+    __shared__ float shda[1024];
+    __shared__ float sha[1024];
+
+    int begin_batch_w = blockIdx.x * n * p;
+    int begin_batch_da = blockIdx.x * n;
+    int begin_batch_a = blockIdx.x * p;
+
+    if(lid < n) {
+        shda[lid] = da[begin_batch_da + lid];
+    }
+
+    if(lid < p) {
+        sha[lid] = a_previous[begin_batch_a + lid];
+    }
+
+    __syncthreads();
+
+    if(lid < n) {
+        for(int col=0; col<p; col++) {
+            dw[begin_batch_w + lid*n + col] = shda[lid] * sha[col];
+        }
     }
 }
 
+// w_l {n_l, p_l} = w_l {n_l, p_l} - lr * dw {n_l, p_l}
 __device__ void k_update_weights(float* w, float* dw, int n, int p, float learn_rate) {
-    int thread_number = blockDim.x * blockIdx.x + threadIdx.x;
+    int lid = threadIdx.x;
+    int begin_batch = blockIdx.x * n * p;
 
-    if (thread_number < n*p){
-        float total = 0;
-        for(int i=0;i<BATCH_SIZE;i++){
-            total += dw[thread_number%(n*p) + (i*n*p)];
-        }       
-        w[thread_number] -= learn_rate * (total/BATCH_SIZE);
+    if(n > p) {
+        if(lid < n) {
+            for(int col=0; col<p; col++) {
+                atomicAdd(&w[lid*n + col],  -learn_rate * w[begin_batch + lid*n + col]/BATCH_SIZE);
+            }
+        }
+    }
+    else {
+        if(lid < p) {
+            for(int row=0; row<n; row++) {
+                atomicAdd(&w[lid*p + row], -learn_rate * w[begin_batch + lid*p + row]/BATCH_SIZE);
+            }
+        }
     }
 }
 
+// b_l {n_l, 1} = b_l {n_l, 1} - lr * da{n_l, 1}
 __device__ void k_update_bias(float* b, float* da, int n, float learn_rate) {
-    int thread_number = blockDim.x * blockIdx.x + threadIdx.x;
+    int lid = threadIdx.x;
+    int begin_batch = blockIdx.x * n;
 
-    if (thread_number < n){
-        float total = 0;
-        for(int i=0;i<BATCH_SIZE;i++){
-            total += da[thread_number%n + (i*n)];
-        }       
-        b[thread_number] -= learn_rate * (total/BATCH_SIZE);
+    if (lid < n){    
+        atomicAdd(&b[lid], -learn_rate * da[begin_batch + lid]/BATCH_SIZE);
     }
 }
 
-__device__ void k_back_propagation(network* net) {
+
+__global__ void k_back_propagation(network* net) {
     layer* l;
     for(int i=net->nb_layers-1; i>-1;i--) {
         l = net->layers[i];
@@ -355,38 +398,48 @@ __device__ void k_back_propagation(network* net) {
     }
 }
 
-// result{n, 1} = w_{n, p} * a_{p, 1} + b_{n, 1}
-__device__ void k_feed_forward(float* x, float* w, float* bias, float* z, int n, int p) {
-    int thread_number = blockDim.x * blockIdx.x + threadIdx.x;
+// result{n, 1} = o(w_{n, p} * x_{p, 1} + b_{n, 1})
+__device__ void k_feed_forward(float* x, float* w, float* bias, float* z, float* a, int n, int p, bool last_layer) {
+    int lid = threadIdx.x;
 
-    if (thread_number < n*BATCH_SIZE){
-        int row = thread_number%n;
-        float res = 0;
-        int begin_x = thread_number/n * p;
-        for(int i=0;i<p;i++){
-            res += w[row * p + i] * x[i + begin_x];
-        }
-        z[thread_number] = res + bias[row];
+    __shared__ float shx[1024];
+
+    int begin_batch = blockIdx.x*n;
+    float res = 0;
+
+    if(lid < p) {
+        shx[lid] = x[lid + blockIdx.x*p];
     }
-}
+    __syncthreads();
 
-__device__ void k_activation(float* z, float* a, int p, int n, bool last_layer) {
-    int thread_number = blockDim.x * blockIdx.x + threadIdx.x;
 
-    if (thread_number < n*BATCH_SIZE){
-    //activation softmax pour le dernier layer
+    if (lid < n){
+
+
+        for(int col=0; col<p; col++) {
+            res += w[lid*p + col] * shx[col];
+        }
+
+        res += bias[lid + begin_batch];
+
+        z[lid + begin_batch] = res;
+
+    }
+
+    __syncthreads();
+
+    if(lid < n) {
+        //activation softmax pour le dernier layer
         if(last_layer) {
             float sum = 0;
-            int begin = thread_number - (thread_number%n);
-            for(int j=0; j<n; j++) {  //commun pour les n valeurs de result
-                sum += expf(z[j + begin]);
+            for(int j=0; j<n; j++) {
+                sum += expf(z[j + begin_batch]);
             }
-
-            a[thread_number] = expf(z[thread_number])/sum; 
+            a[lid + begin_batch] = expf(z[lid + begin_batch])/sum; 
         }
         //activation ReLu pour les autres
         else {
-            a[thread_number] = z[thread_number] * (z[thread_number] >= 0);
+            a[lid + begin_batch] = z[lid + begin_batch] * (z[lid + begin_batch] >= 0);
         }
     }
 }
@@ -399,33 +452,24 @@ __global__ void k_step(network* n) {
         last_layer = i == (n->nb_layers-1);
 
         if (i == 0) {
-            k_feed_forward(l->x, l->w, l->b, l->z, l->n, l->p);
+            k_feed_forward(l->x, l->w, l->b, l->z, l->a, l->n, l->p, last_layer);
         }
         else
         {
-            k_feed_forward(n->layers[i-1]->a, l->w, l->b, l->z, l->n, l->p);
+            k_feed_forward(n->layers[i-1]->a, l->w, l->b, l->z, l->a, l->n, l->p, last_layer);
         }
-        __syncthreads();
-
-        k_activation(l->z, l->a, l->p, l->n, last_layer);
-
-        __syncthreads();
     } 
-
-    /* k_back_propagation(n);
-
-    __syncthreads(); */
 }
 
 int main(int argc, char **argv){
 
     network* net = create_empty_network();
 
-    add_layer_to_network(net, create_layer(4, 30));
-    add_layer_to_network(net, create_layer(30, 3));
+    add_layer_to_network(net, create_layer(2, 4));
+    add_layer_to_network(net, create_layer(4, 2));
 
-    float x[8] = {0.6530f, 0.2698f, 0.7625f, 0.9401f, 0.48f, 0.59f, 0.85f, 0.95f};
-    float y[3*BATCH_SIZE] = {1.0f, 0, 1.0f, 0, 1.0, 0}; //nombre de classes * nombre de d'obervastions
+    float x[4] = {1, 1, 1, 1};
+    float y[2*BATCH_SIZE] = {1.0f, 0, 1.0f, 0}; //nombre de classes * nombre de d'obervastions
 
     load_new_batch(x, y, net);
 
@@ -434,14 +478,19 @@ int main(int argc, char **argv){
 
     cudaMemcpy(dnet, net, sizeof(network), cudaMemcpyHostToDevice);
 
+    printf("b² before update: \n");
+    for(int i=0; i<net->layers[1]->n; i++){
+        printf("%f\n", net->layers[1]->b[i]);
+    }
+
     printf("W² before update: \n");
     for(int i=0; i<net->layers[1]->n*net->layers[1]->p; i++){
         printf("%f\n", net->layers[1]->w[i]);
-    }
+    } 
 
-    for(int i=0; i<50; i++){
-        k_step<<<1, 1024>>>(net);
-    }
+    k_step<<<BATCH_SIZE, 1024>>>(dnet);
+
+    k_back_propagation<<<BATCH_SIZE, 1024>>>(dnet);
 
     cudaMemcpy(net, dnet, sizeof(network), cudaMemcpyDeviceToHost);
 
@@ -455,7 +504,18 @@ int main(int argc, char **argv){
 
     printf("W¹ : \n");
     for(int i=0; i<net->layers[0]->n*net->layers[0]->p; i++){
+        if(i%net->layers[0]->p == 0) {
+            printf("----------%d\n", i/net->layers[0]->p);
+        }
         printf("%f\n", net->layers[0]->w[i]);
+    }
+
+    printf("Z¹ : \n");
+    for(int i=0; i<net->layers[0]->n*BATCH_SIZE; i++){
+        if(i%2 == 0) {
+            printf("----------%d\n", i/2);
+        }
+        printf("%f\n", net->layers[0]->z[i]);
     }
 
     printf("A¹ : \n");
@@ -466,15 +526,31 @@ int main(int argc, char **argv){
         printf("%f\n", net->layers[0]->a[i]);
     }
 
+    printf("b² after update: %d\n", net->layers[1]->n);
+    for(int i=0; i<net->layers[1]->n; i++){
+        printf("%f\n", net->layers[1]->b[i]);
+    }
+
     printf("W² after update: \n");
     for(int i=0; i<net->layers[1]->n*net->layers[1]->p; i++){
+        if(i%net->layers[1]->p == 0) {
+            printf("----------%d\n", i/net->layers[1]->p);
+        }
         printf("%f\n", net->layers[1]->w[i]);
+    }
+
+    printf("Z² : \n");
+    for(int i=0; i<net->layers[1]->n*BATCH_SIZE; i++){
+        if(i%2 == 0) {
+            printf("----------%d\n", i/2);
+        }
+        printf("%f\n", net->layers[1]->z[i]);
     }
 
     printf("results : \n");
     for(int i=0; i<net->layers[net->nb_layers-1]->n*BATCH_SIZE; i++){
-        if(i%3 == 0) {
-            printf("----------%d\n", i/3);
+        if(i%2 == 0) {
+            printf("----------%d\n", i/2);
         }
         printf("%f\n", net->layers[net->nb_layers-1]->a[i]);
     }
@@ -483,6 +559,8 @@ int main(int argc, char **argv){
     for(int i=0; i<net->layers[1]->n*net->layers[0]->p; i++){
         printf("%f\n", net->layers[1]->wT[i]);
     }
+
+    printf("Error : %f\n", net->error[0]);
 
     cross_entropy(net);
 
