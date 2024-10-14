@@ -316,9 +316,10 @@ __global__ void k_step(network* n) {
 int main(int argc, char **argv){
 
     network* net = create_empty_network();
+    network* net2 = create_empty_network();
 
-    add_layer_to_network(net, create_layer(2, 4));
-    add_layer_to_network(net, create_layer(4, 2));
+    add_layer_to_network(net, create_layer(2, 10));
+    add_layer_to_network(net, create_layer(10, 2));
 
     float x[4] = {1, 1, 1, 1};
     float y[2*BATCH_SIZE] = {1.0f, 0, 1.0f, 0}; //nombre de classes * nombre de d'obervastions
@@ -326,9 +327,7 @@ int main(int argc, char **argv){
     load_new_batch(x, y, net);
 
     network *dnet;
-    handle_malloc((void**)&dnet, sizeof(network));
-
-    cudaMemcpy(dnet, net, sizeof(network), cudaMemcpyHostToDevice);
+    net_copy(net, dnet, net2);
 
     printf("b² before update: \n");
     for(int i=0; i<net->layers[1]->n; i++){
@@ -344,9 +343,13 @@ int main(int argc, char **argv){
 
     k_back_propagation<<<BATCH_SIZE, 1024>>>(dnet);
 
-    cudaMemcpy(net, dnet, sizeof(network), cudaMemcpyDeviceToHost);
+    printf("Done\n");
 
-    printf("X : \n");
+    cudaMemcpy(net, dnet, net->layers[1]->n*net->layers[1]->p*sizeof(float), cudaMemcpyDeviceToHost);
+
+    printf("%d\n", net->nb_layers);
+    printf("Done2\n");
+    /* printf("X : \n");
     for(int i=0; i<net->layers[0]->p*BATCH_SIZE; i++){
         if(i%2 == 0) {
             printf("----------%d\n", i/2);
@@ -382,16 +385,16 @@ int main(int argc, char **argv){
     for(int i=0; i<net->layers[1]->n; i++){
         printf("%f\n", net->layers[1]->b[i]);
     }
-
-    printf("W² after update: \n");
+    */
+    /* printf("W² after update: \n");
     for(int i=0; i<net->layers[1]->n*net->layers[1]->p; i++){
         if(i%net->layers[1]->p == 0) {
             printf("----------%d\n", i/net->layers[1]->p);
         }
         printf("%f\n", net->layers[1]->w[i]);
-    }
+    }  */
 
-    printf("Z² : \n");
+    /* printf("Z² : \n");
     for(int i=0; i<net->layers[1]->n*BATCH_SIZE; i++){
         if(i%2 == 0) {
             printf("----------%d\n", i/2);
@@ -416,7 +419,7 @@ int main(int argc, char **argv){
 
     cross_entropy(net);
 
-    printf("Error : %f\n", net->error[0]);
+    printf("Error : %f\n", net->error[0]);  */
     
     cudaFree(dnet);
 

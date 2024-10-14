@@ -34,5 +34,7 @@ network* create_network_with_layers(int nb_layers, ...);
 network* create_empty_network();
 void load_new_batch(float* x, float* y, network* net);
 void add_layer_to_network(network* n, layer* l);
+void layer_copy(layer* l, layer* dl, layer* l2);
+void net_copy(network* net, network* dnet, network* net2);
 
 #endif
