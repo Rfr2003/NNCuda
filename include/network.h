@@ -28,13 +28,13 @@ float normal_distribution(float mean, float stddev);
 void initialize_weights_he(float* w, int p, int n);
 float random_float_0_to_1();
 void handle_malloc(void** dp, int size);
-void handle_copy_of_network(network* net_to_copy, network* other, int direction);
 layer* create_layer(int p, int n);
 network* create_network_with_layers(int nb_layers, ...);
 network* create_empty_network();
 void load_new_batch(float* x, float* y, network* net);
 void add_layer_to_network(network* n, layer* l);
-void layer_copy(layer* l, layer* dl, layer* l2);
-void net_copy(network* net, network* dnet, network* net2);
+void layer_copy_HostToDevice(layer* l, float *dw, float *dx, float *db, float *da, float *dz, float *dwT, float *daT, float *dda, float *ddw);
+void layer_copy_DeviceToHost(layer* l, float *dw, float *dx, float *db, float *da, float *dz, float *dwT, float *daT, float *dda, float *ddw);
+
 
 #endif

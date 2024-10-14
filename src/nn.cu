@@ -214,7 +214,7 @@ __device__ void k_update_bias(float* b, float* da, int n, float learn_rate) {
 }
 
 
-__global__ void k_back_propagation(network* net) {
+__device__ void k_back_propagation(network *net) {
     layer* l;
     for(int i=net->nb_layers-1; i>-1;i--) {
         l = net->layers[i];
@@ -248,10 +248,10 @@ __global__ void k_back_propagation(network* net) {
 
         __syncthreads();
     }
-}
+} 
 
 // result{n, 1} = o(w_{n, p} * x_{p, 1} + b_{n, 1})
-__device__ void k_feed_forward(float* x, float* w, float* bias, float* z, float* a, int n, int p, bool last_layer) {
+__global__ void k_feed_forward(float* x, float* w, float* bias, float* z, float* a, int n, int p, bool last_layer) {
     int lid = threadIdx.x;
 
     __shared__ float shx[1024];
@@ -296,27 +296,53 @@ __device__ void k_feed_forward(float* x, float* w, float* bias, float* z, float*
     }
 }
 
-__global__ void k_step(network* n) {
+void k_step(network* n) {
     bool last_layer;
     for(int i=0; i<n->nb_layers; i++) {
         layer* l = n->layers[i];
 
+        float *dw, *dx, *db, *da, *dz, *dwT, *daT, *dda, *ddw;
+
+        cudaMalloc((void**)&dw, sizeof(float)*l->n*l->p);
+        cudaMalloc((void**)&dx, sizeof(float)*l->p*BATCH_SIZE);
+        cudaMalloc((void**)&db, sizeof(float)*l->n);
+        cudaMalloc((void**)&da, sizeof(float)*l->n*BATCH_SIZE);
+        cudaMalloc((void**)&dz, sizeof(float)*l->n*BATCH_SIZE);
+        cudaMalloc((void**)&dwT, sizeof(float)*l->n*l->p);
+        cudaMalloc((void**)&daT, sizeof(float)*l->n*BATCH_SIZE);
+        cudaMalloc((void**)&dda, sizeof(float)*l->n*BATCH_SIZE);
+        cudaMalloc((void**)&ddw, sizeof(float)*l->n*BATCH_SIZE*l->p);
+
+        layer_copy_HostToDevice(l, dw, dx, db, da, dz, dwT, daT, dda, ddw);
+
         last_layer = i == (n->nb_layers-1);
 
-        if (i == 0) {
-            k_feed_forward(l->x, l->w, l->b, l->z, l->a, l->n, l->p, last_layer);
+        k_feed_forward<<<BATCH_SIZE, 1024>>>(dx, dw, db, dz, da, l->n, l->p, last_layer);
+
+        layer_copy_DeviceToHost(l, dw, dx, db, da, dz, dwT, daT, dda, ddw);
+
+        if(last_layer == 0) {
+            for(int j=0; j<l->n; j++) {
+                n->layers[i+1]->x[j] = l->a[j];
+            }
         }
-        else
-        {
-            k_feed_forward(n->layers[i-1]->a, l->w, l->b, l->z, l->a, l->n, l->p, last_layer);
-        }
+
+        cudaFree(dw);
+        cudaFree(dx);
+        cudaFree(db);
+        cudaFree(da);
+        cudaFree(dz);
+        cudaFree(dwT);
+        cudaFree(daT);
+        cudaFree(dda);
+        cudaFree(ddw);
+
     } 
 }
 
 int main(int argc, char **argv){
 
     network* net = create_empty_network();
-    network* net2 = create_empty_network();
 
     add_layer_to_network(net, create_layer(2, 10));
     add_layer_to_network(net, create_layer(10, 2));
@@ -325,9 +351,6 @@ int main(int argc, char **argv){
     float y[2*BATCH_SIZE] = {1.0f, 0, 1.0f, 0}; //nombre de classes * nombre de d'obervastions
 
     load_new_batch(x, y, net);
-
-    network *dnet;
-    net_copy(net, dnet, net2);
 
     printf("b² before update: \n");
     for(int i=0; i<net->layers[1]->n; i++){
@@ -339,17 +362,11 @@ int main(int argc, char **argv){
         printf("%f\n", net->layers[1]->w[i]);
     } 
 
-    k_step<<<BATCH_SIZE, 1024>>>(dnet);
+    k_step(net);
 
-    k_back_propagation<<<BATCH_SIZE, 1024>>>(dnet);
+    //k_back_propagation<<<BATCH_SIZE, 1024>>>(dnet);
 
-    printf("Done\n");
-
-    cudaMemcpy(net, dnet, net->layers[1]->n*net->layers[1]->p*sizeof(float), cudaMemcpyDeviceToHost);
-
-    printf("%d\n", net->nb_layers);
-    printf("Done2\n");
-    /* printf("X : \n");
+    printf("X : \n");
     for(int i=0; i<net->layers[0]->p*BATCH_SIZE; i++){
         if(i%2 == 0) {
             printf("----------%d\n", i/2);
@@ -385,16 +402,16 @@ int main(int argc, char **argv){
     for(int i=0; i<net->layers[1]->n; i++){
         printf("%f\n", net->layers[1]->b[i]);
     }
-    */
-    /* printf("W² after update: \n");
+    
+    printf("W² after update: \n");
     for(int i=0; i<net->layers[1]->n*net->layers[1]->p; i++){
         if(i%net->layers[1]->p == 0) {
             printf("----------%d\n", i/net->layers[1]->p);
         }
         printf("%f\n", net->layers[1]->w[i]);
-    }  */
+    }  
 
-    /* printf("Z² : \n");
+    printf("Z² : \n");
     for(int i=0; i<net->layers[1]->n*BATCH_SIZE; i++){
         if(i%2 == 0) {
             printf("----------%d\n", i/2);
@@ -419,9 +436,7 @@ int main(int argc, char **argv){
 
     cross_entropy(net);
 
-    printf("Error : %f\n", net->error[0]);  */
-    
-    cudaFree(dnet);
+    printf("Error : %f\n", net->error[0]); 
 
     return 0;
 }

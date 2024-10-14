@@ -50,115 +50,65 @@ void handle_malloc(void** dp, int size) {
     float* da; //dim (n, 1) * BATCH_size
     float* dw; //dim (n, p) * BATCH_size */
 
-void layer_copy(layer* l, layer* dl, layer* l2) {
-    float *dw, *dx, *db, *da, *dz, *dwT, *daT, *dda, *ddw;
+void layer_copy_HostToDevice(layer* l, float *dw, float *dx, float *db, float *da, float *dz, float *dwT, float *daT, float *dda, float *ddw) {
+    
     int size;
 
-    l2->n = l->n;
-    l2->p = l->p;
+    size = sizeof(float) * l->n * l->p;
+    cudaMemcpy(dw, l->w, size, cudaMemcpyHostToDevice);
+
+    size = sizeof(float) * l->p * BATCH_SIZE;
+    cudaMemcpy(dx, l->x, size, cudaMemcpyHostToDevice);
+
+    size = sizeof(float) * l->n;
+    cudaMemcpy(db, l->b, size, cudaMemcpyHostToDevice);
+
+    size = sizeof(float) * l->n * BATCH_SIZE;
+    cudaMemcpy(da, l->a, size, cudaMemcpyHostToDevice);
+    cudaMemcpy(dz, l->z, size, cudaMemcpyHostToDevice);
+    
+    size = sizeof(float) * l->n * l->p;
+    cudaMemcpy(dwT, l->wT, size, cudaMemcpyHostToDevice);
+
+    size = sizeof(float) * l->n * BATCH_SIZE;
+    cudaMemcpy(daT, l->aT, size, cudaMemcpyHostToDevice);
+    cudaMemcpy(dda, l->da, size, cudaMemcpyHostToDevice);
+
+    size = sizeof(float) * l->n * BATCH_SIZE * l->p;
+    cudaMemcpy(ddw, l->dw, size, cudaMemcpyHostToDevice);
+
+}
+
+void layer_copy_DeviceToHost(layer* l, float *dw, float *dx, float *db, float *da, float *dz, float *dwT, float *daT, float *dda, float *ddw) {
+    int size;
 
     size = sizeof(float)*l->n*l->p;
-    handle_malloc((void**)&dw, size);
-    cudaMemcpy(dw, l->w, size, cudaMemcpyHostToDevice);
-    l2->w = dw;
+    cudaMemcpy(l->w, dw, size, cudaMemcpyDeviceToHost);
 
     size = sizeof(float)*l->p*BATCH_SIZE;
-    handle_malloc((void**)&dx, size);
-    cudaMemcpy(dx, l->x, size, cudaMemcpyHostToDevice);
-    l2->x = dx;
+    cudaMemcpy(l->x, dx, size, cudaMemcpyDeviceToHost);
+
 
     size = sizeof(float)*l->n;
-    handle_malloc((void**)&db, size);
-    cudaMemcpy(db, l->b, size, cudaMemcpyHostToDevice);
-    l2->b = db;
+    cudaMemcpy(l->b, db, size, cudaMemcpyDeviceToHost);
 
     size = sizeof(float)*l->n*BATCH_SIZE;
-    handle_malloc((void**)&da, size);
-    cudaMemcpy(da, l->a, size, cudaMemcpyHostToDevice);
-    l2->a = da;
+    cudaMemcpy(l->a, da, size, cudaMemcpyDeviceToHost);
 
     size = sizeof(float)*l->n*BATCH_SIZE;
-    handle_malloc((void**)&dz, size);
-    cudaMemcpy(dz, l->z, size, cudaMemcpyHostToDevice);
-    l2->z = dz;
+    cudaMemcpy(l->z, dz, size, cudaMemcpyDeviceToHost);
 
     size = sizeof(float)*l->n*l->p;
-    handle_malloc((void**)&dwT, size);
-    cudaMemcpy(dwT, l->wT, size, cudaMemcpyHostToDevice);
-    l2->wT = dwT;
+    cudaMemcpy(l->wT, dwT, size, cudaMemcpyDeviceToHost);
 
     size = sizeof(float)*l->n*BATCH_SIZE;
-    handle_malloc((void**)&daT, size);
-    cudaMemcpy(daT, l->aT, size, cudaMemcpyHostToDevice);
-    l2->aT = daT;
+    cudaMemcpy(l->aT, daT, size, cudaMemcpyDeviceToHost);
 
     size = sizeof(float)*l->n*BATCH_SIZE;
-    handle_malloc((void**)&dda, size);
-    cudaMemcpy(dda, l->da, size, cudaMemcpyHostToDevice);
-    l2->da = dda;
+    cudaMemcpy(l->da, dda, size, cudaMemcpyDeviceToHost);
 
     size = sizeof(float)*l->n*BATCH_SIZE*l->p;
-    handle_malloc((void**)&ddw, size);
-    cudaMemcpy(ddw, l->dw, size, cudaMemcpyHostToDevice);
-    l2->dw = ddw;
-
-    cudaMemcpy(dl, &(l2), sizeof(layer), cudaMemcpyHostToDevice);
-}
-
-/* struct network {
-    int nb_layers;
-    layer** layers;
-    float* y;
-    float* error;
-}typedef network; */
-
-void net_copy(network* net, network* dnet, network* net2) {
-
-    net2->nb_layers = net->nb_layers;
-    handle_malloc((void**)&dnet, sizeof(network));
-    int size;
-
-    layer** dlayers;
-    float *dy, *derror;
-
-    size = sizeof(float)*BATCH_SIZE*net->layers[net->nb_layers-1]->n;
-    handle_malloc((void**)&dy, size);
-    cudaMemcpy(dy, net->y, size, cudaMemcpyHostToDevice);
-    net2->y = dy;
-
-    size = sizeof(float);
-    handle_malloc((void**)&derror, size);
-    cudaMemcpy(derror, net->error, size, cudaMemcpyHostToDevice);
-    net2->error = derror;
-
-    layer **layers2 = (layer**)malloc(sizeof(net->nb_layers)*sizeof(layer)); 
-
-    layer* l, *dl, *l2;
-    for(int i=0; i<net->nb_layers; i++) {
-        l = net->layers[i];
-
-        handle_malloc((void**)&dl, sizeof(layer));
-        l2 = (layer*)malloc(sizeof(layer));
-
-        layer_copy(l, dl, l2);
-
-        layers2[i] = dl;
-    }
-
-    handle_malloc((void**)&dlayers, sizeof(layer*)*net->nb_layers);
-
-    cudaMemcpy(dlayers, layers2, sizeof(net->nb_layers)*sizeof(layer), cudaMemcpyHostToDevice);
-
-    net2->layers = dlayers;
-
-    cudaMemcpy(dnet, &(net2), sizeof(network), cudaMemcpyHostToDevice);
-
-    free(layers2);
-
-}
-
-void handle_copy_of_network(network* net_to_copy, network* other, int direction) {
-    
+    cudaMemcpy(l->dw, ddw, size, cudaMemcpyDeviceToHost);
 }
 
 //initialise les connexions entre deux layers
@@ -174,7 +124,7 @@ layer* create_layer(int p, int n) {
     l->p = p;
 
     l->w = (float*)malloc(sizeof(float)*n*p); 
-    l->x = NULL; 
+    l->x = (float*)malloc(sizeof(float)*p*BATCH_SIZE); 
     l->b = (float*)malloc(sizeof(float)*n);
     l->a = (float*)malloc(sizeof(float)*n*BATCH_SIZE);
     l->z = (float*)malloc(sizeof(float)*n*BATCH_SIZE);
